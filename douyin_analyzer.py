@@ -6,6 +6,7 @@ import argparse
 import re
 import sqlite3
 import time
+from contextlib import closing
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -78,6 +79,23 @@ def normalize_profile_url(url: str) -> str:
     return url
 
 
+def parse_video_cards(cards: list[dict[str, str]]) -> list[VideoMetric]:
+    videos: dict[str, VideoMetric] = {}
+    for card in cards:
+        match = VIDEO_ID_PATTERN.search(card.get("href", ""))
+        if match is None:
+            continue
+        video_id = match.group(1)
+        plays, likes = extract_metrics(card.get("text", ""))
+        videos[video_id] = VideoMetric(
+            video_id=video_id,
+            title=" ".join(card.get("title", "").split())[:200],
+            play_count=plays,
+            like_count=likes,
+        )
+    return list(videos.values())
+
+
 def scrape_profile(profile_url: str, scrolls: int) -> list[VideoMetric]:
     try:
         from playwright.sync_api import sync_playwright
@@ -119,26 +137,13 @@ def scrape_profile(profile_url: str, scrolls: int) -> list[VideoMetric]:
         finally:
             browser.close()
 
-    videos: dict[str, VideoMetric] = {}
-    for card in cards:
-        match = VIDEO_ID_PATTERN.search(card["href"])
-        if match is None:
-            continue
-        video_id = match.group(1)
-        plays, likes = extract_metrics(card["text"])
-        videos[video_id] = VideoMetric(
-            video_id=video_id,
-            title=" ".join(card["title"].split())[:200],
-            play_count=plays,
-            like_count=likes,
-        )
-
+    videos = parse_video_cards(cards)
     if not videos:
         raise RuntimeError(
             "未能从页面读取视频。请确认主页公开可访问；如果出现登录、验证码或"
             "访问限制，请稍后再试，不要尝试绕过平台限制。"
         )
-    return list(videos.values())
+    return videos
 
 
 def initialize_database(connection: sqlite3.Connection) -> None:
@@ -166,27 +171,28 @@ def save_snapshot(
 ) -> str:
     captured_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
     database.parent.mkdir(parents=True, exist_ok=True)
-    with sqlite3.connect(database) as connection:
-        initialize_database(connection)
-        cursor = connection.execute(
-            "INSERT INTO snapshots (profile_url, captured_at) VALUES (?, ?)",
-            (profile_url, captured_at),
-        )
-        connection.executemany(
-            """INSERT INTO video_metrics
-               (snapshot_id, video_id, title, play_count, like_count)
-               VALUES (?, ?, ?, ?, ?)""",
-            [
-                (
-                    cursor.lastrowid,
-                    video.video_id,
-                    video.title,
-                    video.play_count,
-                    video.like_count,
-                )
-                for video in videos
-            ],
-        )
+    with closing(sqlite3.connect(database)) as connection:
+        with connection:
+            initialize_database(connection)
+            cursor = connection.execute(
+                "INSERT INTO snapshots (profile_url, captured_at) VALUES (?, ?)",
+                (profile_url, captured_at),
+            )
+            connection.executemany(
+                """INSERT INTO video_metrics
+                   (snapshot_id, video_id, title, play_count, like_count)
+                   VALUES (?, ?, ?, ?, ?)""",
+                [
+                    (
+                        cursor.lastrowid,
+                        video.video_id,
+                        video.title,
+                        video.play_count,
+                        video.like_count,
+                    )
+                    for video in videos
+                ],
+            )
     return captured_at
 
 
@@ -201,7 +207,7 @@ def generate_chart(database: Path, chart_path: Path) -> None:
             "缺少 matplotlib 依赖。请先运行 pip install -r requirements.txt。"
         ) from exc
 
-    with sqlite3.connect(database) as connection:
+    with closing(sqlite3.connect(database)) as connection:
         rows = connection.execute(
             """SELECT s.captured_at, SUM(v.play_count), SUM(v.like_count)
                FROM snapshots AS s

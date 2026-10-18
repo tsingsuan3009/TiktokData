@@ -3,6 +3,7 @@ import unittest
 from douyin_analyzer import (
     extract_metrics,
     normalize_profile_url,
+    parse_video_cards,
     parse_count,
 )
 
@@ -38,6 +39,30 @@ class ProfileUrlTests(unittest.TestCase):
     def test_rejects_non_douyin_hosts(self):
         with self.assertRaises(ValueError):
             normalize_profile_url("https://example.com/user")
+
+
+class ParseVideoCardsTests(unittest.TestCase):
+    def test_extracts_video_metrics_and_deduplicates_video_ids(self):
+        videos = parse_video_cards(
+            [
+                {
+                    "href": "https://www.douyin.com/video/12345",
+                    "title": "  一个  视频 ",
+                    "text": "播放量 1.2万 点赞 345",
+                },
+                {
+                    "href": "https://www.douyin.com/video/12345",
+                    "title": "更新标题",
+                    "text": "播放量 2万 点赞 500",
+                },
+                {"href": "https://www.douyin.com/user/example", "title": "", "text": ""},
+            ]
+        )
+        self.assertEqual(len(videos), 1)
+        self.assertEqual(videos[0].video_id, "12345")
+        self.assertEqual(videos[0].title, "更新标题")
+        self.assertEqual(videos[0].play_count, 20_000)
+        self.assertEqual(videos[0].like_count, 500)
 
 
 if __name__ == "__main__":

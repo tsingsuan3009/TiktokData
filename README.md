@@ -1,6 +1,6 @@
 # 抖音视频数据趋势分析
 
-使用 Playwright 访问公开可见的抖音个人主页，定时保存视频播放量、点赞量快照，并生成播放量与点赞量总和的变化趋势图。
+提供命令行采集脚本和 Windows 桌面应用。桌面应用包含实时时钟、内置浏览器、个人主页地址栏、视频数据表格和趋势图；定时保存公开主页可见的播放量与点赞量快照。
 
 ## 环境准备
 
@@ -13,9 +13,17 @@ python -m pip install -r requirements.txt
 python -m playwright install chromium
 ```
 
-## 使用方法
+## 桌面应用
 
-只采集一次：
+```powershell
+python douyin_analyzer_gui.py
+```
+
+在应用内输入公开的抖音主页 URL，点击“打开主页”，再点击“开始采集”。应用首次采集后会按设定间隔继续保存数据；点击“停止采集”结束。应用内置浏览器也可用于导航到公开主页。数据保存在 `data/douyin_metrics.sqlite`，趋势图保存到 `data/metrics_trend.png`。
+
+## 命令行用法
+
+仅采集一次：
 
 ```powershell
 python douyin_analyzer.py "https://www.douyin.com/user/你的用户ID" --once
@@ -27,7 +35,7 @@ python douyin_analyzer.py "https://www.douyin.com/user/你的用户ID" --once
 python douyin_analyzer.py "https://www.douyin.com/user/你的用户ID"
 ```
 
-可通过 `--interval` 设置间隔秒数，`--database` 指定 SQLite 数据库，`--chart` 指定 PNG 图表输出路径，`--scrolls` 设置主页滚动次数。数据默认保存在 `data/douyin_metrics.sqlite`，图表默认输出到 `data/metrics_trend.png`。数据库和图表不会提交到 Git。
+可通过 `--interval` 设置间隔秒数，`--database` 指定 SQLite 数据库，`--chart` 指定 PNG 图表输出路径，`--scrolls` 设置主页滚动次数。数据库和图表不会提交到 Git。
 
 ## 数据说明与限制
 
