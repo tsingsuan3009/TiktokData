@@ -89,6 +89,9 @@ class AnalyzerWindow(QMainWindow):
         self._capture_attempts = 0
         self._max_capture_attempts = 8
         self._like_scan_active = False
+        self._returning_to_profile = False
+        self._profile_return_attempts = 0
+        self._max_profile_return_attempts = 2
         self._restoring_profile = False
         self._like_scan_profile_url = ""
         self._like_scan_videos: list[VideoMetric] = []
@@ -317,6 +320,35 @@ class AnalyzerWindow(QMainWindow):
         if self._restoring_profile:
             self._restoring_profile = False
             return
+        if self._returning_to_profile:
+            if not self._is_on_profile_url(self._like_scan_profile_url):
+                return
+            if success:
+                self._returning_to_profile = False
+                self._profile_return_attempts = 0
+                QTimer.singleShot(
+                    self._like_scan_delay_ms,
+                    self._open_next_video_for_like_scan,
+                )
+                return
+            self._profile_return_attempts += 1
+            if self._profile_return_attempts <= self._max_profile_return_attempts:
+                self.status.setText(
+                    "返回主页失败，正在重试后再继续采集……"
+                )
+                QTimer.singleShot(
+                    1_000,
+                    lambda: self.browser.setUrl(
+                        QUrl(self._like_scan_profile_url)
+                    ),
+                )
+                return
+            self._returning_to_profile = False
+            self.status.setText(
+                "多次尝试仍无法返回主页，已停止后续视频采集。"
+            )
+            self._finish_video_like_scan_batch()
+            return
         if self._like_scan_active:
             video = self._current_video_for_like_scan()
             if video is None:
@@ -357,6 +389,7 @@ class AnalyzerWindow(QMainWindow):
         was_scanning_likes = self._like_scan_active
         profile_url = self._like_scan_profile_url
         self._like_scan_active = False
+        self._returning_to_profile = False
         self._like_scan_videos = []
         self._like_scan_results = {}
         self._like_scan_index = 0
@@ -548,9 +581,28 @@ class AnalyzerWindow(QMainWindow):
         if self._like_scan_index >= len(self._like_scan_videos):
             self._finish_video_like_scan_batch()
             return
-        QTimer.singleShot(
-            self._like_scan_delay_ms,
-            self._open_next_video_for_like_scan,
+        self._returning_to_profile = True
+        self._profile_return_attempts = 0
+        self.status.setText(
+            f"已读取第 {self._like_scan_index}/{len(self._like_scan_videos)} 条视频点赞量；"
+            "正在返回主页，再继续下一条。"
+        )
+        profile_url = self._like_scan_profile_url
+        if self._is_on_profile_url(profile_url):
+            self._returning_to_profile = False
+            QTimer.singleShot(
+                self._like_scan_delay_ms,
+                self._open_next_video_for_like_scan,
+            )
+        else:
+            self.browser.setUrl(QUrl(profile_url))
+
+    def _is_on_profile_url(self, profile_url: str) -> bool:
+        target = QUrl(profile_url)
+        current = self.browser.url()
+        return (
+            current.host() == target.host()
+            and current.path().rstrip("/") == target.path().rstrip("/")
         )
 
     def _finish_video_like_scan_batch(self) -> None:
