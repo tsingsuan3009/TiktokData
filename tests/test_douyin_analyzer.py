@@ -75,6 +75,20 @@ class ParseVideoCardsTests(unittest.TestCase):
         self.assertEqual(videos[0].play_count, 20_000)
         self.assertEqual(videos[0].like_count, 500)
 
+    def test_parses_play_count_displayed_without_a_text_label(self):
+        videos = parse_video_cards(
+            [
+                {
+                    "href": "https://www.douyin.com/video/12345",
+                    "title": "示例作品",
+                    "text": "示例作品",
+                    "play_count": "1.2万",
+                }
+            ]
+        )
+        self.assertEqual(videos[0].play_count, 12_000)
+        self.assertIsNone(videos[0].like_count)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import sys
 import sqlite3
 from pathlib import Path
@@ -40,7 +41,7 @@ PROJECT_DIR = Path(__file__).resolve().parent
 DATABASE_PATH = PROJECT_DIR / "data" / "douyin_metrics.sqlite"
 CHART_PATH = PROJECT_DIR / "data" / "metrics_trend.png"
 VIDEO_CARDS_SCRIPT = """
-(() => Array.from(document.querySelectorAll("a[href*='/video/']")).map(anchor => {
+JSON.stringify(Array.from(document.querySelectorAll("a[href*='/video/']")).map(anchor => {
     let node = anchor;
     let cardText = anchor.innerText || '';
     for (let depth = 0; node && depth < 8; depth++, node = node.parentElement) {
@@ -50,13 +51,27 @@ VIDEO_CARDS_SCRIPT = """
             if (/(播放|观看|点赞|获赞|like|view)/i.test(text)) break;
         }
     }
+    let playCount = '';
+    for (const value of anchor.querySelectorAll('span')) {
+        const count = (value.innerText || '').trim();
+        const icon = value.previousElementSibling;
+        const path = icon?.querySelector('svg path')?.getAttribute('d') || '';
+        if (/^\\d+(?:\\.\\d+)?(?:万|亿|千|[kKmM])?$/.test(count) &&
+            icon?.getAttribute('role') === 'img' &&
+            /^M[^L]*L/.test(path)) {
+            playCount = count;
+            break;
+        }
+    }
     return {
         href: anchor.href,
-        title: anchor.getAttribute('title') ||
+        title: anchor.querySelector('p')?.innerText ||
+            anchor.getAttribute('title') ||
             anchor.getAttribute('aria-label') || anchor.innerText || '',
-        text: cardText
+        text: cardText,
+        play_count: playCount
     };
-}))()
+}))
 """
 
 
@@ -359,16 +374,30 @@ class AnalyzerWindow(QMainWindow):
             lambda cards: self._finish_collection(profile_url, cards),
         )
 
-    def _finish_collection(self, profile_url: str, cards: object) -> None:
+    def _finish_collection(self, profile_url: str, result: object) -> None:
         if not self._is_collecting:
             return
         if self.browser.url().toString() != profile_url:
             self._capture_in_progress = False
             self.status.setText("页面已切换；请在目标抖音主页重新开始采集。")
             return
+        if not isinstance(result, str):
+            self._capture_in_progress = False
+            result_type = type(result).__name__
+            self.status.setText(
+                f"网页脚本未返回有效文本（{result_type}）。"
+                "请刷新主页后重试；如持续出现，请提供此提示。"
+            )
+            return
+        try:
+            cards = json.loads(result)
+        except json.JSONDecodeError as error:
+            self._capture_in_progress = False
+            self.status.setText(f"网页脚本返回的数据格式无效：{error.msg}。请刷新后重试。")
+            return
         if not isinstance(cards, list):
             self._capture_in_progress = False
-            self.status.setText("页面未返回视频数据。请检查主页是否公开可访问，再刷新后重试。")
+            self.status.setText("网页脚本返回的数据不是视频列表。请刷新主页后重试。")
             return
         valid_cards = [
             card
@@ -377,6 +406,7 @@ class AnalyzerWindow(QMainWindow):
             and isinstance(card.get("href"), str)
             and isinstance(card.get("title", ""), str)
             and isinstance(card.get("text", ""), str)
+            and isinstance(card.get("play_count", ""), str)
         ]
         videos = parse_video_cards(valid_cards)
         if not videos:

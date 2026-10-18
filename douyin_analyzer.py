@@ -89,6 +89,9 @@ def parse_video_cards(cards: list[dict[str, str]]) -> list[VideoMetric]:
             continue
         video_id = match.group(1)
         plays, likes = extract_metrics(card.get("text", ""))
+        displayed_play_count = card.get("play_count", "").strip()
+        if plays is None and displayed_play_count:
+            plays = parse_count(displayed_play_count)
         videos[video_id] = VideoMetric(
             video_id=video_id,
             title=" ".join(card.get("title", "").split())[:200],
