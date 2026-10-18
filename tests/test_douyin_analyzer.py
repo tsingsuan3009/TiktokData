@@ -2,6 +2,7 @@ import unittest
 
 from douyin_analyzer import (
     extract_metrics,
+    parse_detail_like_count,
     normalize_profile_url,
     parse_video_cards,
     parse_count,
@@ -18,6 +19,15 @@ class ParseCountTests(unittest.TestCase):
     def test_rejects_unrecognized_values(self):
         with self.assertRaises(ValueError):
             parse_count("很多")
+
+
+class DetailLikeCountTests(unittest.TestCase):
+    def test_parses_visible_video_detail_like_count(self):
+        self.assertEqual(parse_detail_like_count(" 1.2万\n"), 12_000)
+
+    def test_returns_none_for_missing_or_non_numeric_count(self):
+        self.assertIsNone(parse_detail_like_count(""))
+        self.assertIsNone(parse_detail_like_count("点赞"))
 
 
 class ExtractMetricsTests(unittest.TestCase):

@@ -57,6 +57,17 @@ def parse_count(value: str) -> int:
     return round(number * multiplier)
 
 
+def parse_detail_like_count(value: str) -> int | None:
+    """Parse the visible like count from a video-detail page."""
+    normalized = value.strip()
+    if not normalized:
+        return None
+    try:
+        return parse_count(normalized)
+    except ValueError:
+        return None
+
+
 def extract_metrics(text: str) -> tuple[int | None, int | None]:
     """Extract play and like counts only when their labels are visible."""
     results: dict[str, int | None] = {"play_count": None, "like_count": None}

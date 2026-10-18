@@ -32,6 +32,7 @@ from douyin_analyzer import (
     VideoMetric,
     generate_chart,
     normalize_profile_url,
+    parse_detail_like_count,
     parse_video_cards,
     save_snapshot,
 )
@@ -73,6 +74,9 @@ JSON.stringify(Array.from(document.querySelectorAll("a[href*='/video/']")).map(a
     };
 }))
 """
+VIDEO_LIKE_SCRIPT = """
+document.querySelector('[data-e2e="video-player-digg"]')?.innerText?.trim() || ''
+"""
 
 
 class AnalyzerWindow(QMainWindow):
@@ -84,6 +88,14 @@ class AnalyzerWindow(QMainWindow):
         self._capture_in_progress = False
         self._capture_attempts = 0
         self._max_capture_attempts = 8
+        self._like_scan_active = False
+        self._restoring_profile = False
+        self._like_scan_profile_url = ""
+        self._like_scan_videos: list[VideoMetric] = []
+        self._like_scan_results: dict[str, int | None] = {}
+        self._like_scan_index = 0
+        self._like_scan_attempts = 0
+        self._like_scan_delay_ms = 1_500
         self.settings = QSettings()
 
         self.browser = QWebEngineView()
@@ -302,6 +314,21 @@ class AnalyzerWindow(QMainWindow):
             )
 
     def _page_loaded(self, success: bool) -> None:
+        if self._restoring_profile:
+            self._restoring_profile = False
+            return
+        if self._like_scan_active:
+            video = self._current_video_for_like_scan()
+            if video is None:
+                return
+            if not success:
+                self._finish_video_like_scan(video.video_id, None)
+                return
+            QTimer.singleShot(
+                1_200,
+                lambda: self._read_video_like_count(video.video_id),
+            )
+            return
         if not success:
             self.status.setText("网页加载失败。请检查网络，或在内置浏览器中重新打开主页。")
             return
@@ -327,11 +354,21 @@ class AnalyzerWindow(QMainWindow):
         self.status.setText("采集已启动；首次采集将读取当前主页。")
 
     def _stop_collection(self) -> None:
+        was_scanning_likes = self._like_scan_active
+        profile_url = self._like_scan_profile_url
+        self._like_scan_active = False
+        self._like_scan_videos = []
+        self._like_scan_results = {}
+        self._like_scan_index = 0
+        self._like_scan_profile_url = ""
         self._is_collecting = False
         self._capture_in_progress = False
         self._collection_timer.stop()
         self.start_button.setEnabled(True)
         self.stop_button.setEnabled(False)
+        if was_scanning_likes and profile_url:
+            self._restoring_profile = True
+            self.browser.setUrl(QUrl(profile_url))
         self.status.setText("采集已停止。已保存的历史记录和趋势图仍保留。")
 
     def _collect_from_page(self) -> None:
@@ -426,11 +463,116 @@ class AnalyzerWindow(QMainWindow):
             )
             return
 
+        self._start_video_like_scan(profile_url, videos)
+
+    def _start_video_like_scan(
+        self, profile_url: str, videos: list[VideoMetric]
+    ) -> None:
+        self._like_scan_active = True
+        self._like_scan_profile_url = profile_url
+        self._like_scan_videos = videos
+        self._like_scan_results = {}
+        self._like_scan_index = 0
+        self._like_scan_attempts = 0
+        self.status.setText(
+            f"主页已识别 {len(videos)} 条视频；正在逐条打开视频读取点赞量……"
+        )
+        self._open_next_video_for_like_scan()
+
+    def _current_video_for_like_scan(self) -> VideoMetric | None:
+        if not self._like_scan_active:
+            return None
+        if self._like_scan_index >= len(self._like_scan_videos):
+            return None
+        return self._like_scan_videos[self._like_scan_index]
+
+    def _open_next_video_for_like_scan(self) -> None:
+        if not self._like_scan_active:
+            return
+        if self._like_scan_index >= len(self._like_scan_videos):
+            self._finish_video_like_scan_batch()
+            return
+        video = self._like_scan_videos[self._like_scan_index]
+        self._like_scan_attempts = 0
+        self.status.setText(
+            f"正在读取点赞量：{self._like_scan_index + 1}/"
+            f"{len(self._like_scan_videos)}"
+        )
+        video_url = f"https://www.douyin.com/video/{video.video_id}"
+        self.browser.setUrl(QUrl(video_url))
+        QTimer.singleShot(
+            30_000,
+            lambda video_id=video.video_id: self._finish_video_like_scan(
+                video_id, None
+            ),
+        )
+
+    def _read_video_like_count(self, video_id: str) -> None:
+        video = self._current_video_for_like_scan()
+        if video is None or video.video_id != video_id:
+            return
+        if self.browser.url().path().rstrip("/").endswith(f"/{video_id}") is False:
+            self._finish_video_like_scan(video_id, None)
+            return
+        self._like_scan_attempts += 1
+        self.browser.page().runJavaScript(
+            VIDEO_LIKE_SCRIPT,
+            lambda value: self._handle_video_like_result(video_id, value),
+        )
+
+    def _handle_video_like_result(self, video_id: str, value: object) -> None:
+        video = self._current_video_for_like_scan()
+        if video is None or video.video_id != video_id:
+            return
+        like_count = (
+            parse_detail_like_count(value)
+            if isinstance(value, str)
+            else None
+        )
+        if like_count is None and self._like_scan_attempts < 3:
+            QTimer.singleShot(
+                1_000,
+                lambda: self._read_video_like_count(video_id),
+            )
+            return
+        self._finish_video_like_scan(video_id, like_count)
+
+    def _finish_video_like_scan(
+        self, video_id: str, like_count: int | None
+    ) -> None:
+        video = self._current_video_for_like_scan()
+        if video is None or video.video_id != video_id:
+            return
+        self._like_scan_results[video_id] = like_count
+        self._like_scan_index += 1
+        if self._like_scan_index >= len(self._like_scan_videos):
+            self._finish_video_like_scan_batch()
+            return
+        QTimer.singleShot(
+            self._like_scan_delay_ms,
+            self._open_next_video_for_like_scan,
+        )
+
+    def _finish_video_like_scan_batch(self) -> None:
+        if not self._like_scan_active:
+            return
+        profile_url = self._like_scan_profile_url
+        videos = [
+            VideoMetric(
+                video_id=video.video_id,
+                title=video.title,
+                play_count=video.play_count,
+                like_count=self._like_scan_results.get(video.video_id),
+            )
+            for video in self._like_scan_videos
+        ]
+        self._like_scan_active = False
         try:
             captured_at = save_snapshot(DATABASE_PATH, profile_url, videos)
         except (OSError, RuntimeError, sqlite3.Error) as error:
             self._capture_in_progress = False
-            self.status.setText(f"保存数据或生成图表失败：{error}")
+            self.status.setText(f"保存采集结果失败：{error}")
+            self._restore_profile_after_like_scan(profile_url)
             return
         self._update_results(videos)
         try:
@@ -438,6 +580,7 @@ class AnalyzerWindow(QMainWindow):
         except (OSError, RuntimeError, sqlite3.Error) as error:
             self._capture_in_progress = False
             self.status.setText(f"数据已保存，但生成趋势图失败：{error}")
+            self._restore_profile_after_like_scan(profile_url)
             return
         pixmap = QPixmap(str(CHART_PATH))
         if not pixmap.isNull():
@@ -448,8 +591,22 @@ class AnalyzerWindow(QMainWindow):
                     Qt.TransformationMode.SmoothTransformation,
                 )
             )
-        self.status.setText(f"最近采集时间：{captured_at}；本次读取 {len(videos)} 条视频。")
+        known_likes = sum(video.like_count is not None for video in videos)
+        self.status.setText(
+            f"最近采集时间：{captured_at}；读取 {len(videos)} 条视频，"
+            f"其中 {known_likes} 条获取到点赞量。"
+        )
         self._capture_in_progress = False
+        self._restore_profile_after_like_scan(profile_url)
+
+    def _restore_profile_after_like_scan(self, profile_url: str) -> None:
+        self._like_scan_videos = []
+        self._like_scan_results = {}
+        self._like_scan_index = 0
+        self._like_scan_profile_url = ""
+        if self.browser.url().toString() != profile_url:
+            self._restoring_profile = True
+            self.browser.setUrl(QUrl(profile_url))
 
     def _update_results(self, videos: list[VideoMetric]) -> None:
         total_plays = sum(video.play_count or 0 for video in videos)
