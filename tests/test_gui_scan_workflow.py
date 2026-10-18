@@ -1,15 +1,27 @@
 import json
 import os
+import tempfile
 import unittest
+from pathlib import Path
+from unittest.mock import patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 os.environ.setdefault("QTWEBENGINE_DISABLE_SANDBOX", "1")
 
 from PySide6.QtCore import QTimer, QUrl
-from PySide6.QtWidgets import QApplication, QMainWindow
+from PySide6.QtWidgets import (
+    QApplication,
+    QLabel,
+    QMainWindow,
+    QProgressBar,
+    QTableWidget,
+)
 
 from douyin_analyzer import VideoMetric
-from douyin_analyzer_gui import AnalyzerWindow, SCROLL_PROFILE_WORKS_SCRIPT
+from douyin_analyzer_gui import (
+    AnalyzerWindow,
+    SCROLL_PROFILE_WORKS_SCRIPT,
+)
 
 
 class FakeBrowser:
@@ -60,6 +72,10 @@ class LikeScanNavigationTests(unittest.TestCase):
             VideoMetric("101", "first", 10, None),
             VideoMetric("202", "second", 20, None),
         ]
+        window._displayed_videos = list(window._like_scan_videos)
+        window.table = QTableWidget(2, 4)
+        window.metrics_summary = QLabel()
+        window.scan_progress = QProgressBar()
         window._like_scan_results = {}
         window._like_scan_index = 0
         window._like_scan_attempts = 1
@@ -177,6 +193,52 @@ class LikeScanNavigationTests(unittest.TestCase):
 
         self.assertIsNone(window.started_scan)
         self.assertIn("超过主页显示的 1 条作品", window.status.text)
+
+
+class ResultsListTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.app = QApplication.instance() or QApplication([])
+
+    def test_updates_like_count_in_video_row(self):
+        window = AnalyzerWindow.__new__(AnalyzerWindow)
+        QMainWindow.__init__(window)
+        window._like_scan_videos = [
+            VideoMetric("101", "first", 10, None),
+            VideoMetric("202", "second", 20, None),
+        ]
+        window._displayed_videos = list(window._like_scan_videos)
+        window._like_scan_results = {"101": 15}
+        window.table = QTableWidget(2, 4)
+        window.metrics_summary = QLabel()
+
+        window._update_video_row("101", 15)
+
+        self.assertEqual(window.table.item(0, 3).text(), "15")
+        self.assertIn("已读取点赞量 1 条", window.metrics_summary.text())
+
+    def test_exports_current_video_list_to_csv(self):
+        window = AnalyzerWindow.__new__(AnalyzerWindow)
+        QMainWindow.__init__(window)
+        window._displayed_videos = [
+            VideoMetric("101", "示例作品", 1_200, 15),
+            VideoMetric("202", "缺少点赞", None, None),
+        ]
+        window.status = FakeStatus()
+
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "videos.csv"
+            with patch(
+                "douyin_analyzer_gui.QFileDialog.getSaveFileName",
+                return_value=(str(output), "CSV 文件 (*.csv)"),
+            ):
+                window._export_results()
+
+            rows = output.read_text(encoding="utf-8-sig").splitlines()
+
+        self.assertEqual(rows[0], "视频标题,视频 ID,播放量,点赞量")
+        self.assertEqual(rows[1], "示例作品,101,1200,15")
+        self.assertEqual(rows[2], "缺少点赞,202,,")
 
 
 if __name__ == "__main__":

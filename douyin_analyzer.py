@@ -1,4 +1,4 @@
-"""Collect visible Douyin video metrics and plot their history."""
+"""Collect visible Douyin video metrics and save historical snapshots."""
 
 from __future__ import annotations
 
@@ -220,53 +220,6 @@ def save_snapshot(
     return captured_at
 
 
-def generate_chart(database: Path, chart_path: Path) -> None:
-    try:
-        import matplotlib
-
-        matplotlib.use("Agg")
-        import matplotlib.pyplot as plt
-    except ImportError as exc:
-        raise RuntimeError(
-            "缺少 matplotlib 依赖。请先运行 pip install -r requirements.txt。"
-        ) from exc
-
-    with closing(sqlite3.connect(database)) as connection:
-        rows = connection.execute(
-            """SELECT s.captured_at, SUM(v.play_count), SUM(v.like_count)
-               FROM snapshots AS s
-               JOIN video_metrics AS v ON v.snapshot_id = s.id
-               GROUP BY s.id
-               ORDER BY s.captured_at"""
-        ).fetchall()
-
-    if not rows or not any(row[1] is not None or row[2] is not None for row in rows):
-        raise RuntimeError(
-            "页面中没有识别到带标签的播放量或点赞量，无法生成趋势图。"
-            "页面可能未公开这些数据，或抖音已调整页面结构。"
-        )
-
-    times = [datetime.fromisoformat(row[0]).astimezone() for row in rows]
-    plays = [row[1] for row in rows]
-    likes = [row[2] for row in rows]
-
-    chart_path.parent.mkdir(parents=True, exist_ok=True)
-    figure, axis = plt.subplots(figsize=(10, 5))
-    if any(value is not None for value in plays):
-        axis.plot(times, plays, marker="o", label="Total plays")
-    if any(value is not None for value in likes):
-        axis.plot(times, likes, marker="o", label="Total likes")
-    axis.set_title("Douyin video metrics over time")
-    axis.set_xlabel("Capture time")
-    axis.set_ylabel("Count")
-    axis.grid(True, alpha=0.3)
-    axis.legend()
-    figure.autofmt_xdate()
-    figure.tight_layout()
-    figure.savefig(chart_path, dpi=150)
-    plt.close(figure)
-
-
 def run(args: argparse.Namespace) -> None:
     profile_url = normalize_profile_url(args.profile_url)
     while True:
@@ -281,8 +234,6 @@ def run(args: argparse.Namespace) -> None:
             f"已识别播放量 {play_entries} 条（合计 {known_plays}），"
             f"点赞量 {like_entries} 条（合计 {known_likes}）"
         )
-        generate_chart(args.database, args.chart)
-        print(f"趋势图已更新：{args.chart}")
         if args.once:
             return
         time.sleep(args.interval)
@@ -290,7 +241,7 @@ def run(args: argparse.Namespace) -> None:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="定时采集公开抖音主页可见的视频数据并绘制趋势图。"
+        description="定时采集公开抖音主页可见的视频播放量和点赞量。"
     )
     parser.add_argument("profile_url", help="公开的抖音个人主页 URL")
     parser.add_argument(
@@ -301,12 +252,6 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         default=Path("data/douyin_metrics.sqlite"),
         help="SQLite 数据库文件路径",
-    )
-    parser.add_argument(
-        "--chart",
-        type=Path,
-        default=Path("data/metrics_trend.png"),
-        help="趋势图输出路径",
     )
     parser.add_argument(
         "--scrolls", type=int, default=5, help="每次采集向下滚动次数（默认 5）"

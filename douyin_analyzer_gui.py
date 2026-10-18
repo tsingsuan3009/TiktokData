@@ -2,22 +2,27 @@
 
 from __future__ import annotations
 
+import csv
 import json
-import sys
 import sqlite3
+import sys
 from pathlib import Path
 
 from PySide6.QtCore import QSettings, QStandardPaths, QTimer, QUrl, Qt
-from PySide6.QtGui import QPixmap, QResizeEvent
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
+    QFileDialog,
+    QFrame,
+    QGroupBox,
     QHBoxLayout,
+    QHeaderView,
     QLabel,
     QLineEdit,
     QMainWindow,
     QMessageBox,
     QPushButton,
+    QProgressBar,
     QSpinBox,
     QSplitter,
     QTableWidget,
@@ -30,7 +35,6 @@ from PySide6.QtWebEngineWidgets import QWebEngineView
 
 from douyin_analyzer import (
     VideoMetric,
-    generate_chart,
     normalize_profile_url,
     parse_detail_like_count,
     parse_video_cards,
@@ -40,8 +44,23 @@ from douyin_analyzer import (
 
 
 PROJECT_DIR = Path(__file__).resolve().parent
-DATABASE_PATH = PROJECT_DIR / "data" / "douyin_metrics.sqlite"
-CHART_PATH = PROJECT_DIR / "data" / "metrics_trend.png"
+DATA_DIR = PROJECT_DIR / "data"
+DATABASE_PATH = DATA_DIR / "douyin_metrics.sqlite"
+
+
+def _configure_data_directory() -> None:
+    global DATA_DIR, DATABASE_PATH
+    if getattr(sys, "frozen", False):
+        local_data_path = QStandardPaths.writableLocation(
+            QStandardPaths.StandardLocation.AppLocalDataLocation
+        )
+        if not local_data_path:
+            raise RuntimeError("无法确定 Windows 本地应用数据目录。")
+        DATA_DIR = Path(local_data_path)
+    else:
+        DATA_DIR = PROJECT_DIR / "data"
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    DATABASE_PATH = DATA_DIR / "douyin_metrics.sqlite"
 PROFILE_WORKS_SCRIPT = """
 JSON.stringify((() => {
     const tab = Array.from(document.querySelectorAll('[role="tab"]'))
@@ -149,7 +168,8 @@ class AnalyzerWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
         self.setWindowTitle("抖音视频数据分析")
-        self.resize(1440, 900)
+        self.resize(1520, 940)
+        self.setMinimumSize(1120, 720)
         self._is_collecting = False
         self._capture_in_progress = False
         self._capture_attempts = 0
@@ -170,15 +190,12 @@ class AnalyzerWindow(QMainWindow):
         self._like_scan_index = 0
         self._like_scan_attempts = 0
         self._like_scan_delay_ms = 1_500
+        self._displayed_videos: list[VideoMetric] = []
         self.settings = QSettings()
 
         self.browser = QWebEngineView()
         self.web_profile = QWebEngineProfile("DouyinAnalyzerProfile", self)
-        profile_root = Path(
-            QStandardPaths.writableLocation(
-                QStandardPaths.StandardLocation.AppLocalDataLocation
-            )
-        ) / "browser-profile"
+        profile_root = DATA_DIR / "browser-profile"
         (profile_root / "storage").mkdir(parents=True, exist_ok=True)
         (profile_root / "cache").mkdir(parents=True, exist_ok=True)
         self.web_profile.setPersistentStoragePath(str(profile_root / "storage"))
@@ -208,14 +225,18 @@ class AnalyzerWindow(QMainWindow):
         self.clock.setStyleSheet("font-size: 18px; font-weight: 600;")
 
         self.back_button = QPushButton("←")
+        self.back_button.setObjectName("navigationButton")
         self.back_button.setToolTip("后退")
         self.back_button.clicked.connect(self.browser.back)
         self.forward_button = QPushButton("→")
+        self.forward_button.setObjectName("navigationButton")
         self.forward_button.setToolTip("前进")
         self.forward_button.clicked.connect(self.browser.forward)
         self.reload_button = QPushButton("刷新")
+        self.reload_button.setObjectName("navigationButton")
         self.reload_button.clicked.connect(self.browser.reload)
         self.go_button = QPushButton("打开主页")
+        self.go_button.setObjectName("secondaryButton")
         self.go_button.clicked.connect(self._navigate)
 
         self.interval = QSpinBox()
@@ -223,24 +244,41 @@ class AnalyzerWindow(QMainWindow):
         self.interval.setValue(300)
         self.interval.setSuffix(" 秒")
         self.start_button = QPushButton("开始采集")
+        self.start_button.setObjectName("primaryButton")
         self.start_button.clicked.connect(self._start_collection)
         self.stop_button = QPushButton("停止采集")
+        self.stop_button.setObjectName("dangerButton")
         self.stop_button.setEnabled(False)
         self.stop_button.clicked.connect(self._stop_collection)
 
-        self.status = QLabel("请填写公开的抖音个人主页网址，然后开始采集。")
-        self.metrics_summary = QLabel("播放量合计：—    点赞量合计：—")
+        self.status = QLabel("输入抖音个人主页网址，打开主页后即可开始采集。")
+        self.status.setObjectName("statusLabel")
+        self.metrics_summary = QLabel("尚无采集数据")
+        self.metrics_summary.setObjectName("summaryLabel")
+        self.scan_progress = QProgressBar()
+        self.scan_progress.setRange(0, 1)
+        self.scan_progress.setValue(0)
+        self.scan_progress.setFormat("%v / %m")
         self.table = QTableWidget(0, 4)
         self.table.setHorizontalHeaderLabels(["视频标题", "视频 ID", "播放量", "点赞量"])
         self.table.setWordWrap(False)
         self.table.setAlternatingRowColors(True)
-        self.table.horizontalHeader().setStretchLastSection(True)
-        self.table.horizontalHeader().setSectionResizeMode(0, self.table.horizontalHeader().ResizeMode.Stretch)
-
-        self.chart = QLabel("采集后将在此显示趋势图")
-        self.chart.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.chart.setMinimumHeight(260)
-        self.chart.setStyleSheet("background: #f4f6f8; border: 1px solid #d9dee5;")
+        self.table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self.table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        self.table.setSelectionMode(QTableWidget.SelectionMode.SingleSelection)
+        self.table.verticalHeader().setVisible(False)
+        self.table.verticalHeader().setDefaultSectionSize(38)
+        self.table.horizontalHeader().setSectionResizeMode(
+            0, QHeaderView.ResizeMode.Stretch
+        )
+        for column in range(1, 4):
+            self.table.horizontalHeader().setSectionResizeMode(
+                column, QHeaderView.ResizeMode.ResizeToContents
+            )
+        self.export_button = QPushButton("导出 CSV")
+        self.export_button.setObjectName("secondaryButton")
+        self.export_button.setEnabled(False)
+        self.export_button.clicked.connect(self._export_results)
 
         self._collection_timer = QTimer(self)
         self._collection_timer.timeout.connect(self._collect_from_page)
@@ -254,57 +292,198 @@ class AnalyzerWindow(QMainWindow):
     def _build_layout(self) -> None:
         root = QWidget()
         layout = QVBoxLayout(root)
+        layout.setContentsMargins(18, 16, 18, 12)
+        layout.setSpacing(12)
 
         heading = QHBoxLayout()
-        title = QLabel("抖音视频数据分析")
-        title.setStyleSheet("font-size: 22px; font-weight: 700;")
+        title = QLabel("抖音视频数据采集")
+        title.setObjectName("appTitle")
         heading.addWidget(title)
+        subtitle = QLabel("主页作品 · 播放量 · 点赞量")
+        subtitle.setObjectName("mutedLabel")
+        heading.addWidget(subtitle)
         heading.addStretch(1)
         heading.addWidget(QLabel("本地时间"))
         heading.addWidget(self.clock)
         layout.addLayout(heading)
 
+        profile_panel = QGroupBox("采集设置")
+        profile_layout = QVBoxLayout(profile_panel)
+        profile_layout.setSpacing(10)
         navigation = QHBoxLayout()
+        navigation.setSpacing(6)
         navigation.addWidget(self.back_button)
         navigation.addWidget(self.forward_button)
         navigation.addWidget(self.reload_button)
         navigation.addWidget(self.address, 1)
         navigation.addWidget(self.go_button)
-        layout.addLayout(navigation)
+        profile_layout.addLayout(navigation)
 
         controls = QHBoxLayout()
-        controls.addWidget(QLabel("采集间隔："))
+        controls.addWidget(QLabel("采集间隔"))
         controls.addWidget(self.interval)
+        controls.addSpacing(12)
         controls.addWidget(self.start_button)
         controls.addWidget(self.stop_button)
         controls.addStretch(1)
-        layout.addLayout(controls)
-
-        login_memory = QHBoxLayout()
-        login_memory.addWidget(QLabel("登录用户名："))
-        login_memory.addWidget(self.username, 1)
-        login_memory.addWidget(self.remember_username)
-        login_memory.addWidget(self.clear_login_button)
-        layout.addLayout(login_memory)
+        controls.addWidget(QLabel("登录用户名"))
+        controls.addWidget(self.username)
+        controls.addWidget(self.remember_username)
+        controls.addWidget(self.clear_login_button)
+        profile_layout.addLayout(controls)
+        layout.addWidget(profile_panel)
 
         splitter = QSplitter(Qt.Orientation.Horizontal)
+        splitter.setObjectName("mainSplitter")
+        splitter.setChildrenCollapsible(False)
+        splitter.setHandleWidth(8)
         splitter.addWidget(self.browser)
 
-        results = QWidget()
+        results = QFrame()
+        results.setObjectName("dataPanel")
         results_layout = QVBoxLayout(results)
-        results_layout.addWidget(QLabel("本次主页视频数据"))
+        results_layout.setContentsMargins(16, 14, 16, 14)
+        results_layout.setSpacing(10)
+        list_heading = QHBoxLayout()
+        list_title = QLabel("作品数据列表")
+        list_title.setObjectName("sectionTitle")
+        list_heading.addWidget(list_title)
+        list_heading.addStretch(1)
+        list_heading.addWidget(self.export_button)
+        results_layout.addLayout(list_heading)
         results_layout.addWidget(self.metrics_summary)
+        results_layout.addWidget(self.scan_progress)
         results_layout.addWidget(self.table, 1)
-        results_layout.addWidget(QLabel("历史总播放量与总点赞量趋势"))
-        results_layout.addWidget(self.chart)
         splitter.addWidget(results)
-        splitter.setStretchFactor(0, 3)
-        splitter.setStretchFactor(1, 2)
+        splitter.setStretchFactor(0, 5)
+        splitter.setStretchFactor(1, 4)
+        splitter.setSizes([760, 650])
         layout.addWidget(splitter, 1)
 
         self.status.setWordWrap(True)
         layout.addWidget(self.status)
         self.setCentralWidget(root)
+        self.setStyleSheet(
+            """
+            QMainWindow, QWidget {
+                background: #f3f6fb;
+                color: #1e293b;
+                font-family: "Segoe UI", "Microsoft YaHei UI";
+                font-size: 10pt;
+            }
+            QGroupBox, #dataPanel {
+                background: #ffffff;
+                border: 1px solid #dce4ef;
+                border-radius: 12px;
+            }
+            QGroupBox {
+                margin-top: 10px;
+                padding: 12px 12px 10px;
+                font-weight: 600;
+            }
+            QGroupBox::title {
+                subcontrol-origin: margin;
+                left: 14px;
+                padding: 0 5px;
+                color: #475569;
+            }
+            #appTitle {
+                color: #12223b;
+                font-size: 20px;
+                font-weight: 700;
+            }
+            #sectionTitle {
+                font-size: 15px;
+                font-weight: 700;
+                color: #12223b;
+            }
+            #mutedLabel, #summaryLabel {
+                color: #64748b;
+            }
+            #statusLabel {
+                padding: 7px 11px;
+                color: #475569;
+                background: #eaf0f8;
+                border-radius: 7px;
+            }
+            QLineEdit, QSpinBox {
+                min-height: 34px;
+                padding: 0 9px;
+                background: #ffffff;
+                border: 1px solid #cbd5e1;
+                border-radius: 7px;
+                selection-background-color: #2563eb;
+            }
+            QLineEdit:focus, QSpinBox:focus {
+                border: 1px solid #3b82f6;
+            }
+            QPushButton {
+                min-height: 34px;
+                padding: 0 12px;
+                border: 1px solid #cbd5e1;
+                border-radius: 7px;
+                background: #ffffff;
+                font-weight: 600;
+            }
+            QPushButton:hover {
+                background: #f1f5f9;
+            }
+            QPushButton:disabled {
+                color: #94a3b8;
+                background: #e2e8f0;
+            }
+            #navigationButton {
+                min-width: 38px;
+                padding: 0;
+            }
+            #primaryButton {
+                color: #ffffff;
+                background: #2563eb;
+                border-color: #2563eb;
+            }
+            #primaryButton:hover {
+                background: #1d4ed8;
+            }
+            #dangerButton {
+                color: #b42318;
+                border-color: #fecaca;
+                background: #fff7f7;
+            }
+            QTableWidget {
+                background: #ffffff;
+                alternate-background-color: #f8fafc;
+                border: 1px solid #e2e8f0;
+                border-radius: 8px;
+                gridline-color: #edf1f6;
+                selection-background-color: #dbeafe;
+                selection-color: #172554;
+            }
+            QHeaderView::section {
+                min-height: 34px;
+                padding: 0 8px;
+                color: #475569;
+                background: #f1f5f9;
+                border: none;
+                border-bottom: 1px solid #dce4ef;
+                font-weight: 700;
+            }
+            QProgressBar {
+                max-height: 14px;
+                color: #475569;
+                background: #e2e8f0;
+                border: none;
+                border-radius: 6px;
+                text-align: center;
+            }
+            QProgressBar::chunk {
+                background: #3b82f6;
+                border-radius: 6px;
+            }
+            QSplitter::handle {
+                background: transparent;
+            }
+            """
+        )
         self.browser.setUrl(QUrl("https://www.douyin.com/"))
 
     def _update_clock(self) -> None:
@@ -459,6 +638,11 @@ class AnalyzerWindow(QMainWindow):
     def _stop_collection(self) -> None:
         was_scanning_likes = self._like_scan_active
         profile_url = self._like_scan_profile_url
+        if was_scanning_likes:
+            self.scan_progress.setRange(
+                0, max(len(self._like_scan_videos), 1)
+            )
+            self.scan_progress.setValue(self._like_scan_index)
         self._like_scan_active = False
         self._returning_to_profile = False
         self._like_scan_videos = []
@@ -473,7 +657,7 @@ class AnalyzerWindow(QMainWindow):
         if was_scanning_likes and profile_url:
             self._restoring_profile = True
             self.browser.setUrl(QUrl(profile_url))
-        self.status.setText("采集已停止。已保存的历史记录和趋势图仍保留。")
+        self.status.setText("采集已停止。已保存的历史采集记录仍保留。")
 
     def _collect_from_page(self) -> None:
         if not self._is_collecting or self._capture_in_progress:
@@ -622,6 +806,11 @@ class AnalyzerWindow(QMainWindow):
         self._like_scan_results = {}
         self._like_scan_index = 0
         self._like_scan_attempts = 0
+        self._displayed_videos = list(videos)
+        self._update_results(videos)
+        self.scan_progress.setRange(0, max(len(videos), 1))
+        self.scan_progress.setValue(0)
+        self.export_button.setEnabled(bool(videos))
         self.status.setText(
             f"主页已识别 {len(videos)} 条视频；正在逐条打开视频读取点赞量……"
         )
@@ -692,7 +881,9 @@ class AnalyzerWindow(QMainWindow):
         if video is None or video.video_id != video_id:
             return
         self._like_scan_results[video_id] = like_count
+        self._update_video_row(video_id, like_count)
         self._like_scan_index += 1
+        self._update_scan_progress()
         if self._like_scan_index >= len(self._like_scan_videos):
             self._finish_video_like_scan_batch()
             return
@@ -742,22 +933,7 @@ class AnalyzerWindow(QMainWindow):
             self._restore_profile_after_like_scan(profile_url)
             return
         self._update_results(videos)
-        try:
-            generate_chart(DATABASE_PATH, CHART_PATH)
-        except (OSError, RuntimeError, sqlite3.Error) as error:
-            self._capture_in_progress = False
-            self.status.setText(f"数据已保存，但生成趋势图失败：{error}")
-            self._restore_profile_after_like_scan(profile_url)
-            return
-        pixmap = QPixmap(str(CHART_PATH))
-        if not pixmap.isNull():
-            self.chart.setPixmap(
-                pixmap.scaled(
-                    self.chart.size(),
-                    Qt.AspectRatioMode.KeepAspectRatio,
-                    Qt.TransformationMode.SmoothTransformation,
-                )
-            )
+        self.export_button.setEnabled(bool(videos))
         known_likes = sum(video.like_count is not None for video in videos)
         self.status.setText(
             f"最近采集时间：{captured_at}；读取 {len(videos)} 条视频，"
@@ -776,13 +952,12 @@ class AnalyzerWindow(QMainWindow):
             self.browser.setUrl(QUrl(profile_url))
 
     def _update_results(self, videos: list[VideoMetric]) -> None:
-        total_plays = sum(video.play_count or 0 for video in videos)
-        total_likes = sum(video.like_count or 0 for video in videos)
+        self._displayed_videos = list(videos)
         known_plays = sum(video.play_count is not None for video in videos)
-        known_likes = sum(video.like_count is not None for video in videos)
         self.metrics_summary.setText(
-            f"播放量合计：{total_plays:,}（识别 {known_plays} 条）"
-            f"    点赞量合计：{total_likes:,}（识别 {known_likes} 条）"
+            f"作品 {len(videos):,} 条    ·    已识别播放量 {known_plays:,} 条"
+            f"    ·    已读取点赞量 "
+            f"{sum(video.like_count is not None for video in videos):,} 条"
         )
         self.table.setRowCount(len(videos))
         for row, video in enumerate(videos):
@@ -795,27 +970,82 @@ class AnalyzerWindow(QMainWindow):
             for column, value in enumerate(values):
                 item = QTableWidgetItem(value)
                 if column > 1:
-                    item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+                    item.setTextAlignment(
+                        Qt.AlignmentFlag.AlignRight
+                        | Qt.AlignmentFlag.AlignVCenter
+                    )
                 self.table.setItem(row, column, item)
 
-    def resizeEvent(self, event: QResizeEvent) -> None:
-        super().resizeEvent(event)
-        if CHART_PATH.exists():
-            pixmap = QPixmap(str(CHART_PATH))
-            if not pixmap.isNull():
-                self.chart.setPixmap(
-                    pixmap.scaled(
-                        self.chart.size(),
-                        Qt.AspectRatioMode.KeepAspectRatio,
-                        Qt.TransformationMode.SmoothTransformation,
-                    )
+    def _update_video_row(self, video_id: str, like_count: int | None) -> None:
+        for row, video in enumerate(self._like_scan_videos):
+            if video.video_id == video_id:
+                updated_video = VideoMetric(
+                    video_id=video.video_id,
+                    title=video.title,
+                    play_count=video.play_count,
+                    like_count=like_count,
                 )
+                self._displayed_videos[row] = updated_video
+                item = QTableWidgetItem(
+                    f"{like_count:,}" if like_count is not None else "未获取"
+                )
+                item.setTextAlignment(
+                    Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
+                )
+                self.table.setItem(row, 3, item)
+                break
+        known_likes = sum(
+            value is not None for value in self._like_scan_results.values()
+        )
+        self.metrics_summary.setText(
+            f"作品 {len(self._like_scan_videos):,} 条    ·    "
+            f"已识别播放量 "
+            f"{sum(video.play_count is not None for video in self._like_scan_videos):,} 条"
+            f"    ·    "
+            f"已读取点赞量 {known_likes:,} 条"
+        )
 
+    def _update_scan_progress(self) -> None:
+        total = len(self._like_scan_videos)
+        self.scan_progress.setRange(0, max(total, 1))
+        self.scan_progress.setValue(min(self._like_scan_index, total))
+
+    def _export_results(self) -> None:
+        if not self._displayed_videos:
+            return
+        path, _ = QFileDialog.getSaveFileName(
+            self,
+            "导出视频数据",
+            "douyin_video_metrics.csv",
+            "CSV 文件 (*.csv)",
+        )
+        if not path:
+            return
+        try:
+            with Path(path).open("w", newline="", encoding="utf-8-sig") as file:
+                writer = csv.writer(file)
+                writer.writerow(["视频标题", "视频 ID", "播放量", "点赞量"])
+                writer.writerows(
+                    [
+                        [
+                            video.title,
+                            video.video_id,
+                            video.play_count if video.play_count is not None else "",
+                            video.like_count if video.like_count is not None else "",
+                        ]
+                        for video in self._displayed_videos
+                    ]
+                )
+        except OSError as error:
+            QMessageBox.critical(self, "导出失败", f"无法写入 CSV 文件：{error}")
+            return
+        self.status.setText(f"数据列表已导出：{path}")
 
 def main() -> int:
     app = QApplication(sys.argv)
     app.setOrganizationName("DouyinDataAnalyzer")
     app.setApplicationName("DouyinDataAnalyzer")
+    _configure_data_directory()
     window = AnalyzerWindow()
     window.show()
     return app.exec()
