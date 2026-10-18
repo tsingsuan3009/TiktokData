@@ -6,10 +6,11 @@ import sys
 import sqlite3
 from pathlib import Path
 
-from PySide6.QtCore import QTimer, QUrl, Qt
-from PySide6.QtGui import QPixmap
+from PySide6.QtCore import QSettings, QStandardPaths, QTimer, QUrl, Qt
+from PySide6.QtGui import QPixmap, QResizeEvent
 from PySide6.QtWidgets import (
     QApplication,
+    QCheckBox,
     QHBoxLayout,
     QLabel,
     QLineEdit,
@@ -23,6 +24,7 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
+from PySide6.QtWebEngineCore import QWebEnginePage, QWebEngineProfile
 from PySide6.QtWebEngineWidgets import QWebEngineView
 
 from douyin_analyzer import (
@@ -64,14 +66,39 @@ class AnalyzerWindow(QMainWindow):
         self.setWindowTitle("抖音视频数据分析")
         self.resize(1440, 900)
         self._is_collecting = False
+        self.settings = QSettings()
 
         self.browser = QWebEngineView()
+        self.web_profile = QWebEngineProfile("DouyinAnalyzerProfile", self)
+        profile_root = Path(
+            QStandardPaths.writableLocation(
+                QStandardPaths.StandardLocation.AppLocalDataLocation
+            )
+        ) / "browser-profile"
+        (profile_root / "storage").mkdir(parents=True, exist_ok=True)
+        (profile_root / "cache").mkdir(parents=True, exist_ok=True)
+        self.web_profile.setPersistentStoragePath(str(profile_root / "storage"))
+        self.web_profile.setCachePath(str(profile_root / "cache"))
+        self.web_profile.setPersistentCookiesPolicy(
+            QWebEngineProfile.PersistentCookiesPolicy.ForcePersistentCookies
+        )
+        self.browser.setPage(QWebEnginePage(self.web_profile, self.browser))
         self.browser.urlChanged.connect(self._sync_address)
         self.browser.loadFinished.connect(self._page_loaded)
 
         self.address = QLineEdit("https://www.douyin.com/")
         self.address.setPlaceholderText("输入抖音个人主页网址")
         self.address.returnPressed.connect(self._navigate)
+        saved_username = self.settings.value("login/username", "")
+        self.username = QLineEdit()
+        self.username.setPlaceholderText("可选：输入登录用户名（不会读取或保存密码）")
+        self.username.setText(saved_username if isinstance(saved_username, str) else "")
+        self.username.editingFinished.connect(self._save_remembered_username)
+        self.remember_username = QCheckBox("记住用户名")
+        self.remember_username.setChecked(bool(self.username.text()))
+        self.remember_username.toggled.connect(self._remember_username_changed)
+        self.clear_login_button = QPushButton("清除记忆登录")
+        self.clear_login_button.clicked.connect(self._clear_saved_login)
         self.clock = QLabel()
         self.clock.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         self.clock.setStyleSheet("font-size: 18px; font-weight: 600;")
@@ -149,6 +176,13 @@ class AnalyzerWindow(QMainWindow):
         controls.addStretch(1)
         layout.addLayout(controls)
 
+        login_memory = QHBoxLayout()
+        login_memory.addWidget(QLabel("登录用户名："))
+        login_memory.addWidget(self.username, 1)
+        login_memory.addWidget(self.remember_username)
+        login_memory.addWidget(self.clear_login_button)
+        layout.addLayout(login_memory)
+
         splitter = QSplitter(Qt.Orientation.Horizontal)
         splitter.addWidget(self.browser)
 
@@ -192,6 +226,62 @@ class AnalyzerWindow(QMainWindow):
 
     def _sync_address(self, url: QUrl) -> None:
         self.address.setText(url.toString())
+
+    def _remember_username_changed(self, checked: bool) -> None:
+        if checked:
+            self._save_remembered_username()
+        else:
+            self.settings.remove("login/username")
+
+    def _save_remembered_username(self) -> None:
+        if not self.remember_username.isChecked():
+            return
+        username = self.username.text().strip()
+        if username:
+            self.settings.setValue("login/username", username)
+        else:
+            self.settings.remove("login/username")
+
+    def _clear_saved_login(self) -> None:
+        answer = QMessageBox.question(
+            self,
+            "清除记忆登录",
+            "这将清除已记住的用户名，并删除内置浏览器的登录 Cookie 和当前网页站点存储。是否继续？",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+
+        self._stop_collection()
+        self.settings.remove("login/username")
+        self.username.clear()
+        self.remember_username.setChecked(False)
+        self.web_profile.cookieStore().deleteAllCookies()
+        self.web_profile.clearHttpCache()
+        self.browser.page().runJavaScript(
+            """(() => {
+                try {
+                    localStorage.clear();
+                    sessionStorage.clear();
+                    return true;
+                } catch (error) {
+                    return false;
+                }
+            })()""",
+            self._finish_clear_login,
+        )
+
+    def _finish_clear_login(self, storage_cleared: object) -> None:
+        if storage_cleared is True:
+            self.status.setText(
+                "已清除记住的用户名、浏览器 Cookie、缓存和当前站点存储。"
+            )
+        else:
+            self.status.setText(
+                "已清除记住的用户名、浏览器 Cookie 和缓存；"
+                "当前页面站点存储未能清除，请打开抖音页面后重试。"
+            )
 
     def _page_loaded(self, success: bool) -> None:
         if not success:
@@ -307,7 +397,7 @@ class AnalyzerWindow(QMainWindow):
                     item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
                 self.table.setItem(row, column, item)
 
-    def resizeEvent(self, event: object) -> None:
+    def resizeEvent(self, event: QResizeEvent) -> None:
         super().resizeEvent(event)
         if CHART_PATH.exists():
             pixmap = QPixmap(str(CHART_PATH))
@@ -323,6 +413,8 @@ class AnalyzerWindow(QMainWindow):
 
 def main() -> int:
     app = QApplication(sys.argv)
+    app.setOrganizationName("DouyinDataAnalyzer")
+    app.setApplicationName("DouyinDataAnalyzer")
     window = AnalyzerWindow()
     window.show()
     return app.exec()

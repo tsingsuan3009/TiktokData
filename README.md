@@ -21,6 +21,12 @@ python douyin_analyzer_gui.py
 
 在应用内输入公开的抖音主页 URL，点击“打开主页”，再点击“开始采集”。应用首次采集后会按设定间隔继续保存数据；点击“停止采集”结束。应用内置浏览器也可用于导航到公开主页。数据保存在 `data/douyin_metrics.sqlite`，趋势图保存到 `data/metrics_trend.png`。
 
+### 记忆登录
+
+- 可选输入登录用户名并勾选“记住用户名”，用户名保存在当前 Windows 用户的 Qt 应用设置中；取消勾选即可移除。
+- 可在内置浏览器中手动登录。浏览器 Cookie、缓存和站点存储保存在 `%LOCALAPPDATA%\DouyinDataAnalyzer\DouyinDataAnalyzer\browser-profile`，以便下次启动时沿用浏览器会话。
+- 应用不会读取或保存密码。登录会话相当于登录凭据，请勿在共用或不受信任的 Windows 账户中启用；点击“清除记忆登录”可以清除已记住的用户名、浏览器 Cookie、缓存和当前站点存储。站点存储只在当前页面允许访问时清除；若提示未能清除，请在抖音页面中重试。
+
 ## 命令行用法
 
 仅采集一次：
