@@ -19,7 +19,7 @@ python -m playwright install chromium
 python douyin_analyzer_gui.py
 ```
 
-在应用内输入公开的抖音主页 URL，点击“打开主页”，再点击“开始采集”。应用首次采集后会按设定间隔继续保存数据；点击“停止采集”结束。应用内置浏览器也可用于导航到公开主页。数据保存在 `data/douyin_metrics.sqlite`，趋势图保存到 `data/metrics_trend.png`。
+在应用内输入公开的抖音个人主页 URL（格式为 `https://www.douyin.com/user/用户ID`），点击“打开主页”，再点击“开始采集”。应用会等待主页动态内容加载并尝试滚动加载视频，然后按设定间隔继续保存数据；点击“停止采集”结束。应用内置浏览器也可用于导航到公开主页。数据保存在 `data/douyin_metrics.sqlite`，趋势图保存到 `data/metrics_trend.png`。
 
 ### 记忆登录
 

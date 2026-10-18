@@ -70,13 +70,15 @@ def extract_metrics(text: str) -> tuple[int | None, int | None]:
 
 
 def normalize_profile_url(url: str) -> str:
-    parsed = urlparse(url)
+    parsed = urlparse(url.strip())
     if parsed.scheme not in {"http", "https"} or parsed.hostname not in {
         "www.douyin.com",
         "douyin.com",
     }:
-        raise ValueError("请提供以 https://www.douyin.com/ 开头的抖音主页链接。")
-    return url
+        raise ValueError("请提供抖音个人主页链接，例如 https://www.douyin.com/user/用户ID。")
+    if not re.fullmatch(r"/user/[^/]+/?", parsed.path):
+        raise ValueError("当前网址不是个人主页。请使用 /user/用户ID 格式的抖音主页链接。")
+    return parsed.geturl()
 
 
 def parse_video_cards(cards: list[dict[str, str]]) -> list[VideoMetric]:

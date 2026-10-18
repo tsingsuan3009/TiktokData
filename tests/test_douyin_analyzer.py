@@ -40,6 +40,17 @@ class ProfileUrlTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             normalize_profile_url("https://example.com/user")
 
+    def test_rejects_douyin_feed_as_a_profile(self):
+        with self.assertRaisesRegex(ValueError, "不是个人主页"):
+            normalize_profile_url("https://www.douyin.com/jingxuan")
+
+    def test_accepts_profile_url_with_query_and_whitespace(self):
+        url = " https://www.douyin.com/user/example?from_tab_name=main "
+        self.assertEqual(
+            normalize_profile_url(url),
+            "https://www.douyin.com/user/example?from_tab_name=main",
+        )
+
 
 class ParseVideoCardsTests(unittest.TestCase):
     def test_extracts_video_metrics_and_deduplicates_video_ids(self):

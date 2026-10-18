@@ -66,6 +66,9 @@ class AnalyzerWindow(QMainWindow):
         self.setWindowTitle("抖音视频数据分析")
         self.resize(1440, 900)
         self._is_collecting = False
+        self._capture_in_progress = False
+        self._capture_attempts = 0
+        self._max_capture_attempts = 8
         self.settings = QSettings()
 
         self.browser = QWebEngineView()
@@ -288,7 +291,7 @@ class AnalyzerWindow(QMainWindow):
             self.status.setText("网页加载失败。请检查网络，或在内置浏览器中重新打开主页。")
             return
         if self._is_collecting:
-            self._collect_from_page()
+            QTimer.singleShot(700, self._collect_from_page)
 
     def _start_collection(self) -> None:
         try:
@@ -298,6 +301,7 @@ class AnalyzerWindow(QMainWindow):
             return
 
         self._is_collecting = True
+        self._capture_attempts = 0
         self.start_button.setEnabled(False)
         self.stop_button.setEnabled(True)
         self._collection_timer.start(self.interval.value() * 1_000)
@@ -309,19 +313,47 @@ class AnalyzerWindow(QMainWindow):
 
     def _stop_collection(self) -> None:
         self._is_collecting = False
+        self._capture_in_progress = False
         self._collection_timer.stop()
         self.start_button.setEnabled(True)
         self.stop_button.setEnabled(False)
         self.status.setText("采集已停止。已保存的历史记录和趋势图仍保留。")
 
     def _collect_from_page(self) -> None:
+        if not self._is_collecting or self._capture_in_progress:
+            return
         try:
             profile_url = normalize_profile_url(self.browser.url().toString())
-        except ValueError:
-            self.status.setText("当前浏览页面不是抖音主页；请返回公开的个人主页后再采集。")
+        except ValueError as error:
+            self.status.setText(f"{error} 请在上方地址栏输入个人主页链接。")
             return
 
-        self.status.setText("正在读取当前页面中公开可见的视频信息……")
+        self._capture_in_progress = True
+        self._capture_attempts = 0
+        self.status.setText("正在等待主页视频加载……")
+        self.browser.page().runJavaScript(
+            "window.scrollTo(0, document.body.scrollHeight); true",
+            lambda scrolled: self._schedule_video_read(profile_url, scrolled),
+        )
+
+    def _schedule_video_read(self, profile_url: str, scroll_succeeded: object) -> None:
+        if not self._is_collecting or self.browser.url().toString() != profile_url:
+            self._capture_in_progress = False
+            return
+        if scroll_succeeded is not True:
+            self._capture_in_progress = False
+            self.status.setText("无法读取主页页面状态；请刷新主页后重试。")
+            return
+        QTimer.singleShot(800, lambda: self._read_video_cards(profile_url))
+
+    def _read_video_cards(self, profile_url: str) -> None:
+        if not self._is_collecting or self.browser.url().toString() != profile_url:
+            self._capture_in_progress = False
+            return
+        self._capture_attempts += 1
+        self.status.setText(
+            f"正在识别主页视频……（第 {self._capture_attempts}/{self._max_capture_attempts} 次）"
+        )
         self.browser.page().runJavaScript(
             VIDEO_CARDS_SCRIPT,
             lambda cards: self._finish_collection(profile_url, cards),
@@ -331,9 +363,11 @@ class AnalyzerWindow(QMainWindow):
         if not self._is_collecting:
             return
         if self.browser.url().toString() != profile_url:
+            self._capture_in_progress = False
             self.status.setText("页面已切换；请在目标抖音主页重新开始采集。")
             return
         if not isinstance(cards, list):
+            self._capture_in_progress = False
             self.status.setText("页面未返回视频数据。请检查主页是否公开可访问，再刷新后重试。")
             return
         valid_cards = [
@@ -346,21 +380,33 @@ class AnalyzerWindow(QMainWindow):
         ]
         videos = parse_video_cards(valid_cards)
         if not videos:
+            if self._capture_attempts < self._max_capture_attempts:
+                self.status.setText(
+                    "主页内容仍在加载，正在继续查找视频卡片……"
+                )
+                self.browser.page().runJavaScript(
+                    "window.scrollTo(0, document.body.scrollHeight); true",
+                    lambda scrolled: self._schedule_video_read(profile_url, scrolled),
+                )
+                return
+            self._capture_in_progress = False
             self.status.setText(
-                "未找到视频卡片。请确认主页无需登录即可访问；本程序不会绕过登录、"
-                "验证码或平台访问限制。"
+                "已确认这是个人主页，但多次等待和滚动后仍未找到视频卡片。"
+                "请确认主页内容已加载且无需登录即可查看；本程序不会绕过登录、验证码或平台访问限制。"
             )
             return
 
         try:
             captured_at = save_snapshot(DATABASE_PATH, profile_url, videos)
         except (OSError, RuntimeError, sqlite3.Error) as error:
+            self._capture_in_progress = False
             self.status.setText(f"保存数据或生成图表失败：{error}")
             return
         self._update_results(videos)
         try:
             generate_chart(DATABASE_PATH, CHART_PATH)
         except (OSError, RuntimeError, sqlite3.Error) as error:
+            self._capture_in_progress = False
             self.status.setText(f"数据已保存，但生成趋势图失败：{error}")
             return
         pixmap = QPixmap(str(CHART_PATH))
@@ -373,6 +419,7 @@ class AnalyzerWindow(QMainWindow):
                 )
             )
         self.status.setText(f"最近采集时间：{captured_at}；本次读取 {len(videos)} 条视频。")
+        self._capture_in_progress = False
 
     def _update_results(self, videos: list[VideoMetric]) -> None:
         total_plays = sum(video.play_count or 0 for video in videos)
