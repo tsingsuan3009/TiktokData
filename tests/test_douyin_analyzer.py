@@ -1,11 +1,13 @@
 import unittest
 
 from douyin_analyzer import (
+    VideoMetric,
     extract_metrics,
     parse_detail_like_count,
     normalize_profile_url,
     parse_video_cards,
     parse_count,
+    video_collection_matches_declared_count,
 )
 
 
@@ -98,6 +100,20 @@ class ParseVideoCardsTests(unittest.TestCase):
         )
         self.assertEqual(videos[0].play_count, 12_000)
         self.assertIsNone(videos[0].like_count)
+
+
+class VideoCollectionBoundaryTests(unittest.TestCase):
+    def test_only_accepts_exact_unique_declared_work_count(self):
+        videos = [
+            VideoMetric("101", "first", 10, None),
+            VideoMetric("202", "second", 20, None),
+        ]
+        self.assertTrue(video_collection_matches_declared_count(2, videos))
+        self.assertFalse(video_collection_matches_declared_count(3, videos))
+        self.assertFalse(
+            video_collection_matches_declared_count(2, [videos[0], videos[0]])
+        )
+        self.assertFalse(video_collection_matches_declared_count(-1, []))
 
 
 if __name__ == "__main__":

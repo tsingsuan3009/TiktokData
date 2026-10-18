@@ -35,44 +35,110 @@ from douyin_analyzer import (
     parse_detail_like_count,
     parse_video_cards,
     save_snapshot,
+    video_collection_matches_declared_count,
 )
 
 
 PROJECT_DIR = Path(__file__).resolve().parent
 DATABASE_PATH = PROJECT_DIR / "data" / "douyin_metrics.sqlite"
 CHART_PATH = PROJECT_DIR / "data" / "metrics_trend.png"
-VIDEO_CARDS_SCRIPT = """
-JSON.stringify(Array.from(document.querySelectorAll("a[href*='/video/']")).map(anchor => {
-    let node = anchor;
-    let cardText = anchor.innerText || '';
-    for (let depth = 0; node && depth < 8; depth++, node = node.parentElement) {
-        const text = (node.innerText || '').trim();
-        if (text && text.length <= 1200) {
-            cardText = text;
-            if (/(播放|观看|点赞|获赞|like|view)/i.test(text)) break;
-        }
+PROFILE_WORKS_SCRIPT = """
+JSON.stringify((() => {
+    const tab = Array.from(document.querySelectorAll('[role="tab"]'))
+        .find(item =>
+            item.querySelector('[data-e2e="user-tab-count"]') &&
+            (item.innerText || '').includes('作品')
+        );
+    if (!tab) return {error: '作品总数未显示'};
+    const countText = tab.querySelector('[data-e2e="user-tab-count"]')
+        ?.innerText?.trim().replace(/,/g, '') || '';
+    const expectedCount = /^\\d+$/.test(countText) ? Number(countText) : null;
+    let worksContainer = tab;
+    while (worksContainer && !worksContainer.querySelector("a[href*='/video/']")) {
+        worksContainer = worksContainer.parentElement;
     }
-    let playCount = '';
-    for (const value of anchor.querySelectorAll('span')) {
-        const count = (value.innerText || '').trim();
-        const icon = value.previousElementSibling;
-        const path = icon?.querySelector('svg path')?.getAttribute('d') || '';
-        if (/^\\d+(?:\\.\\d+)?(?:万|亿|千|[kKmM])?$/.test(count) &&
-            icon?.getAttribute('role') === 'img' &&
-            /^M[^L]*L/.test(path)) {
-            playCount = count;
-            break;
+    const firstAnchor = worksContainer?.querySelector("a[href*='/video/']");
+    const worksList = firstAnchor?.closest('ul') || worksContainer;
+    const anchors = Array.from(worksList?.querySelectorAll("a[href*='/video/']") || []);
+    const videos = anchors.map(anchor => {
+        let node = anchor;
+        let cardText = anchor.innerText || '';
+        for (let depth = 0; node && depth < 8; depth++, node = node.parentElement) {
+            const text = (node.innerText || '').trim();
+            if (text && text.length <= 1200) {
+                cardText = text;
+                if (/(播放|观看|点赞|获赞|like|view)/i.test(text)) break;
+            }
         }
+        let playCount = '';
+        for (const value of anchor.querySelectorAll('span')) {
+            const count = (value.innerText || '').trim();
+            const icon = value.previousElementSibling;
+            const path = icon?.querySelector('svg path')?.getAttribute('d') || '';
+            if (/^\\d+(?:\\.\\d+)?(?:万|亿|千|[kKmM])?$/.test(count) &&
+                icon?.getAttribute('role') === 'img' &&
+                /^M[^L]*L/.test(path)) {
+                playCount = count;
+                break;
+            }
+        }
+        return {
+            href: anchor.href,
+            title: anchor.querySelector('p')?.innerText ||
+                anchor.getAttribute('title') ||
+                anchor.getAttribute('aria-label') || anchor.innerText || '',
+            text: cardText,
+            play_count: playCount
+        };
+    });
+    let scroller = worksList;
+    while (scroller && scroller !== document.body &&
+        (scroller.clientHeight <= 0 ||
+         scroller.scrollHeight <= scroller.clientHeight + 20)) {
+        scroller = scroller.parentElement;
+    }
+    if (!scroller || scroller === document.body) {
+        scroller = document.scrollingElement;
     }
     return {
-        href: anchor.href,
-        title: anchor.querySelector('p')?.innerText ||
-            anchor.getAttribute('title') ||
-            anchor.getAttribute('aria-label') || anchor.innerText || '',
-        text: cardText,
-        play_count: playCount
+        expected_count: expectedCount,
+        videos,
+        scroll_top: scroller?.scrollTop || 0,
+        scroll_height: scroller?.scrollHeight || 0,
+        client_height: scroller?.clientHeight || 0
     };
-}))
+})())
+"""
+SCROLL_PROFILE_WORKS_SCRIPT = """
+(() => {
+    const tab = Array.from(document.querySelectorAll('[role="tab"]'))
+        .find(item =>
+            item.querySelector('[data-e2e="user-tab-count"]') &&
+            (item.innerText || '').includes('作品')
+        );
+    let worksContainer = tab;
+    while (worksContainer && !worksContainer.querySelector("a[href*='/video/']")) {
+        worksContainer = worksContainer.parentElement;
+    }
+    const firstAnchor = worksContainer?.querySelector("a[href*='/video/']");
+    const worksList = firstAnchor?.closest('ul') || worksContainer;
+    let scroller = worksList;
+    while (scroller && scroller !== document.body &&
+        (scroller.clientHeight <= 0 ||
+         scroller.scrollHeight <= scroller.clientHeight + 20)) {
+        scroller = scroller.parentElement;
+    }
+    if (!scroller || scroller === document.body) {
+        scroller = document.scrollingElement;
+    }
+    if (!scroller) return false;
+    const step = Math.max(300, Math.floor(scroller.clientHeight * 0.75));
+    scroller.scrollTop = Math.min(
+        scroller.scrollTop + step,
+        scroller.scrollHeight
+    );
+    return true;
+})()
 """
 VIDEO_LIKE_SCRIPT = """
 document.querySelector('[data-e2e="video-player-digg"]')?.innerText?.trim() || ''
@@ -87,7 +153,12 @@ class AnalyzerWindow(QMainWindow):
         self._is_collecting = False
         self._capture_in_progress = False
         self._capture_attempts = 0
-        self._max_capture_attempts = 8
+        self._max_capture_attempts = 200
+        self._profile_expected_count: int | None = None
+        self._profile_videos: dict[str, VideoMetric] = {}
+        self._profile_previous_count = 0
+        self._profile_no_progress_attempts = 0
+        self._max_profile_no_progress_attempts = 8
         self._like_scan_active = False
         self._returning_to_profile = False
         self._profile_return_attempts = 0
@@ -415,32 +486,31 @@ class AnalyzerWindow(QMainWindow):
 
         self._capture_in_progress = True
         self._capture_attempts = 0
-        self.status.setText("正在等待主页视频加载……")
-        self.browser.page().runJavaScript(
-            "window.scrollTo(0, document.body.scrollHeight); true",
-            lambda scrolled: self._schedule_video_read(profile_url, scrolled),
-        )
+        self._profile_expected_count = None
+        self._profile_videos = {}
+        self._profile_previous_count = 0
+        self._profile_no_progress_attempts = 0
+        self.status.setText("正在读取主页作品总数并遍历作品列表……")
+        self._read_profile_works(profile_url)
 
-    def _schedule_video_read(self, profile_url: str, scroll_succeeded: object) -> None:
+    def _schedule_profile_read(self, profile_url: str, scroll_succeeded: object) -> None:
         if not self._is_collecting or self.browser.url().toString() != profile_url:
             self._capture_in_progress = False
             return
         if scroll_succeeded is not True:
             self._capture_in_progress = False
-            self.status.setText("无法读取主页页面状态；请刷新主页后重试。")
+            self.status.setText("无法滚动主页作品列表；请刷新主页后重试。")
             return
-        QTimer.singleShot(800, lambda: self._read_video_cards(profile_url))
+        QTimer.singleShot(900, lambda: self._read_profile_works(profile_url))
 
-    def _read_video_cards(self, profile_url: str) -> None:
+    def _read_profile_works(self, profile_url: str) -> None:
         if not self._is_collecting or self.browser.url().toString() != profile_url:
             self._capture_in_progress = False
             return
         self._capture_attempts += 1
-        self.status.setText(
-            f"正在识别主页视频……（第 {self._capture_attempts}/{self._max_capture_attempts} 次）"
-        )
+        self.status.setText("正在逐屏收集主页作品……")
         self.browser.page().runJavaScript(
-            VIDEO_CARDS_SCRIPT,
+            PROFILE_WORKS_SCRIPT,
             lambda cards: self._finish_collection(profile_url, cards),
         )
 
@@ -465,38 +535,83 @@ class AnalyzerWindow(QMainWindow):
             self._capture_in_progress = False
             self.status.setText(f"网页脚本返回的数据格式无效：{error.msg}。请刷新后重试。")
             return
-        if not isinstance(cards, list):
+        if not isinstance(cards, dict):
             self._capture_in_progress = False
-            self.status.setText("网页脚本返回的数据不是视频列表。请刷新主页后重试。")
+            self.status.setText("网页脚本返回的数据格式不正确。请刷新主页后重试。")
+            return
+        expected_count = cards.get("expected_count")
+        card_items = cards.get("videos")
+        if not isinstance(expected_count, int) or expected_count < 0:
+            self._capture_in_progress = False
+            self.status.setText(
+                "无法读取主页显示的作品总数；为避免数据不完整，本次未开始采集。"
+            )
+            return
+        if not isinstance(card_items, list):
+            self._capture_in_progress = False
+            self.status.setText("主页作品列表格式不正确，请刷新主页后重试。")
+            return
+        if self._profile_expected_count is None:
+            self._profile_expected_count = expected_count
+        elif self._profile_expected_count != expected_count:
+            self._capture_in_progress = False
+            self.status.setText(
+                f"采集期间主页作品总数从 {self._profile_expected_count} 变为 "
+                f"{expected_count}；为确保数量一致，已取消本次采集。"
+            )
             return
         valid_cards = [
             card
-            for card in cards
+            for card in card_items
             if isinstance(card, dict)
             and isinstance(card.get("href"), str)
             and isinstance(card.get("title", ""), str)
             and isinstance(card.get("text", ""), str)
             and isinstance(card.get("play_count", ""), str)
         ]
-        videos = parse_video_cards(valid_cards)
-        if not videos:
-            if self._capture_attempts < self._max_capture_attempts:
-                self.status.setText(
-                    "主页内容仍在加载，正在继续查找视频卡片……"
-                )
-                self.browser.page().runJavaScript(
-                    "window.scrollTo(0, document.body.scrollHeight); true",
-                    lambda scrolled: self._schedule_video_read(profile_url, scrolled),
-                )
-                return
+        for video in parse_video_cards(valid_cards):
+            self._profile_videos[video.video_id] = video
+
+        collected_count = len(self._profile_videos)
+        if collected_count > expected_count:
             self._capture_in_progress = False
             self.status.setText(
-                "已确认这是个人主页，但多次等待和滚动后仍未找到视频卡片。"
-                "请确认主页内容已加载且无需登录即可查看；本程序不会绕过登录、验证码或平台访问限制。"
+                f"读取到 {collected_count} 条不同视频，超过主页显示的 "
+                f"{expected_count} 条作品；可能混入其他列表，已取消本次采集。"
             )
             return
-
-        self._start_video_like_scan(profile_url, videos)
+        if video_collection_matches_declared_count(
+            expected_count, list(self._profile_videos.values())
+        ):
+            self.status.setText(f"作品数量核对通过：{collected_count}/{expected_count}。")
+            self._start_video_like_scan(
+                profile_url, list(self._profile_videos.values())
+            )
+            return
+        if collected_count == self._profile_previous_count:
+            self._profile_no_progress_attempts += 1
+        else:
+            self._profile_no_progress_attempts = 0
+        self._profile_previous_count = collected_count
+        if (
+            self._capture_attempts >= self._max_capture_attempts
+            or self._profile_no_progress_attempts
+            >= self._max_profile_no_progress_attempts
+        ):
+            self._capture_in_progress = False
+            self.status.setText(
+                f"主页显示 {expected_count} 条作品，但目前只遍历到 "
+                f"{collected_count} 条不同视频。为避免少采或重复，已取消本次采集；"
+                "请确认作品列表滚动到底且所有作品可见后重试。"
+            )
+            return
+        self.status.setText(
+            f"正在遍历作品列表：{collected_count}/{expected_count}；继续向下加载……"
+        )
+        self.browser.page().runJavaScript(
+            SCROLL_PROFILE_WORKS_SCRIPT,
+            lambda scrolled: self._schedule_profile_read(profile_url, scrolled),
+        )
 
     def _start_video_like_scan(
         self, profile_url: str, videos: list[VideoMetric]

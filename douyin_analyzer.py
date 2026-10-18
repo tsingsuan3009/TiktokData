@@ -68,6 +68,14 @@ def parse_detail_like_count(value: str) -> int | None:
         return None
 
 
+def video_collection_matches_declared_count(
+    expected_count: int, videos: list[VideoMetric]
+) -> bool:
+    """Return whether unique collected videos exactly match the profile count."""
+    video_ids = {video.video_id for video in videos}
+    return expected_count >= 0 and len(video_ids) == expected_count
+
+
 def extract_metrics(text: str) -> tuple[int | None, int | None]:
     """Extract play and like counts only when their labels are visible."""
     results: dict[str, int | None] = {"play_count": None, "like_count": None}
